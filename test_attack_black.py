@@ -3,9 +3,6 @@ import numpy as np
 import random
 import time
 
-
-from l2_attack_black import BlackBoxL2
-from IFGM_black import IFGM_black
 from FW_black import FW_black
 from classifier import classifier
 

@@ -3,15 +3,7 @@ import numpy as np
 import random
 import time
  
-
-from EAD import EADEN
-
-from l2_attack import CarliniL2
-from li_attack import CarliniLi
-
-from IFGM import IFGM
 from FW import FW
-from PGD import PGD
 
 from classifier import classifier
 
