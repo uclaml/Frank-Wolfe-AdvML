@@ -1,15 +1,14 @@
-# Implementation of Frank-Wolfe white-box attack algorithm by Jinghui Chen
-# Epsilon grid search enabled when eps is set to be 0.0
+
 
 import sys
 import tensorflow as tf
 import numpy as np
 from six.moves import xrange
 import time
-from utils import get_dist, norm_ball_proj_inner, eps_search
+from utils import get_dist, norm_ball_proj_inner, eps_search, grad_normalization
 
 class FW:
-    def __init__(self, sess, model, nb_iter=100, batch_size=1, ord=np.inf, eps=0., clip_min=0, clip_max=1, targeted=True, inception=False, lr = 0.01, loss_type = 'cross_entropy', lambd = 5):
+    def __init__(self, sess, model, nb_iter=100, batch_size=1, ord=np.inf, eps=0., clip_min=0, clip_max=1, targeted=True, inception=False, lr = 0.01, loss_type = 'cross_entropy', lambd = 5, beta1 = 0.9, beta2 = 0.99, adaptive = False, output_steps = 10, test = False):
 
         image_size, num_channels, num_labels = model.image_size, model.num_channels, model.num_labels
         self.sess = sess
@@ -25,6 +24,11 @@ class FW:
         self.lr = lr
         self.loss_type = loss_type
         self.lambd = lambd
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.adaptive = adaptive
+        self.output_steps = output_steps
+        self.test = test
         
         print ('lambda: ', lambd)
 
@@ -54,20 +58,7 @@ class FW:
         self.tloss = tf.reduce_sum(self.loss)
         
         self.gradients, = tf.gradients(self.loss, self.img)
-
-        if self.ord == np.inf:
-            self.signed_grad = tf.sign(self.gradients)
-        elif self.ord == 1:
-            reduc_ind = list(xrange(1, len(self.shape)))
-            self.signed_grad = self.gradients / tf.reduce_sum(tf.abs(self.gradients),
-                                               reduction_indices=reduc_ind,
-                                               keep_dims=True)
-        elif self.ord == 2:
-            reduc_ind = list(xrange(1, len(self.shape)))
-            self.signed_grad = self.gradients / tf.sqrt(tf.reduce_sum(tf.square(self.gradients),
-                                                       reduction_indices=reduc_ind,
-                                                       keep_dims=True))
- 
+         
 
     def attack(self, inputs, targets):
         eps = eps_search(self.epsilon, self.ord)
@@ -87,6 +78,7 @@ class FW:
                 stop_iter_remain = []
                 
                 current_ep = ep*self.lambd
+
                 for i in range(0,len(index_set),self.batch_size):
                     start_time = time.time()
                     start = i
@@ -98,34 +90,47 @@ class FW:
                     batch_data = inputs[ind]
                     batch_lab = targets[ind]
 
-                    x = batch_data
-#                     print (x)
+                    x = np.copy(batch_data)
 
-                    prev = 1e6
                     last_ls = []
-                    
+                    max_lr = self.lr
+        
                     print ('--------------------')
                     for iteration in range(self.nb_iter):
-                        loss, pred, eval_adv, grad = self.sess.run([self.tloss, self.pred, self.eval_adv, self.signed_grad], {self.img: x, self.lab: batch_lab})
+                        loss, pred, eval_adv, grad = self.sess.run([self.tloss, self.pred, self.eval_adv, self.gradients], {self.img: x, self.lab: batch_lab})
                         
-                        v = - current_ep * grad + batch_data
+
+                        
+                        grad_normalized = grad_normalization(grad, self.ord)
+                        
+                        v = - current_ep * grad_normalized + batch_data
                         d = v - x
-                        x = x + self.lr * d
+                        
+                        g = np.sum(d* -grad)
+ 
+                        current_lr = max_lr
+                           
+ 
+                        x = x + current_lr * d
+                            
                         eta = x - batch_data
                         x = batch_data + norm_ball_proj_inner(eta, self.ord, ep)
                     
                         x = np.clip(x, self.clip_min, self.clip_max)
                         
+                        
+                        if self.test:
+                            print (g)
+                            if g < 1:
+                                break
+                        else:
+                            if iteration % self.output_steps == 0:
+                                dist = get_dist(x, batch_data, self.ord)
+                                print ('Iter: ', iteration, 'Loss: ', loss, ' Dist: ', dist , ' Pred: ' , pred, ' Eval: ', eval_adv.all(), ' g: ', g)
+                            if eval_adv.all():
+                                break
 
-                        dist = get_dist(x, batch_data, self.ord)
-                        if iteration % 10 == 0:
-                            print ('Iter: ', iteration, 'Loss: ', loss, ' Dist: ', dist , ' Pred: ' , pred, ' Eval: ', eval_adv.all())
                         
-                        # Adversarial found
-                        if eval_adv.all():
-                            break
-                        
-                        # Early stopping
                         last_ls.append(loss)
                         last_ls = last_ls[-5:]
                         if last_ls[-1] > 0.999 * last_ls[0] and len(last_ls) == 5:
@@ -155,4 +160,5 @@ class FW:
                 print('Remaining: ', len(index_set))
                 print ('Succ ', len(inputs) - len(index_set), ' / ', len(inputs), ' rate: ', 1 - len(index_set)/ len(inputs)) 
                 
+#         print (adv[0], stop_iter)
         return adv, time_images, 1 - len(index_set)/ len(inputs), stop_iter

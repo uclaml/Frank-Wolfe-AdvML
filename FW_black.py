@@ -1,5 +1,3 @@
-# Implementation of Frank-Wolfe black-box attack algorithm by Jinghui Chen
-
 import sys
 import tensorflow as tf
 import numpy as np
@@ -7,11 +5,11 @@ from six.moves import xrange
 import time
 
 
-from utils import get_dist, norm_ball_proj_inner, grad_normalization
+from utils import get_dist, norm_ball_proj_inner, grad_normalization, eps_search
 
 
 class FW_black:
-    def __init__(self, sess, model, nb_iter=10000, grad_est_batch_size=25, ord=np.inf, eps=0.05, clip_min=0, clip_max=1, targeted=True, inception=False, lr = 0.03, delta = 0.01, loss_type = 'cross_entropy', sensing_type = 'gaussian', lambd = 30):
+    def __init__(self, sess, model, nb_iter=10000, grad_est_batch_size=25, ord=np.inf, eps=0.05, clip_min=0, clip_max=1, targeted=True, inception=False, lr = 0.03, delta = 0.01, loss_type = 'cross_entropy', sensing_type = 'gaussian', lambd = 30, beta1 = 0.999, beta2 = 0.99, adaptive = False, output_steps = 10, test = False):
 
         image_size, num_channels, num_labels = model.image_size, model.num_channels, model.num_labels
         self.sess = sess
@@ -30,6 +28,11 @@ class FW_black:
         self.loss_type = loss_type
         self.sensing_type = sensing_type
         self.lambd = lambd
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.adaptive = adaptive
+        self.output_steps = output_steps
+        self.test = test
 
         self.shape = (self.batch_size,image_size,image_size,num_channels)
         self.single_shape = (image_size,image_size,num_channels)
@@ -134,7 +137,8 @@ class FW_black:
             current_ep = self.epsilon*self.lambd
             num_queries = 0
             last_ls = []
-            prev_g = 0
+ 
+            
             print ('--------------------')
             for iteration in range(self.nb_iter):
                 loss, pred, eval_adv, true_grad = self.sess.run([self.tloss, self.pred, self.eval_adv, self.gradients], {self.img: x, self.lab: batch_lab})
@@ -143,32 +147,41 @@ class FW_black:
                 l, grad = get_grad_est(x, batch_lab, num_batches)
                 num_queries += num_batches*self.grad_est_batch_size *2
                                 
-                grad = grad_normalization(grad, self.ord)
 
-                max_lr = self.lr / (iteration + 1)**0.5
-                current_lr = max_lr
+                # LR Decaying
+                current_lr = self.lr / (iteration + 1)**0.5
+    
+ 
+                grad_normalized = grad_normalization(grad, self.ord)
+#                 grad_normalized = grad_normalization(true_grad, self.ord)
+ 
 
-
-                v = - current_ep * grad + batch_data
+                v = - current_ep * grad_normalized + batch_data
                 d = v - x
+        
+                g = self.epsilon*np.sum(np.abs(true_grad)) - np.sum((batch_data - x)*true_grad)
+                 
                 x = x + current_lr * d
 
                 eta = x - batch_data
                 x = batch_data + norm_ball_proj_inner(eta, self.ord, self.epsilon)
                 x = np.clip(x, self.clip_min, self.clip_max)
 
-                dist = get_dist(x, batch_data, self.ord)
-                
-                if iteration % 10 == 0:
-                    print("Iter: {}, Loss: {:0.5f}, Queries: {},  Dist: {:0.5f}, Eps:  {}, lr: {:.5f}, Pred: {},  Eval: {}".format(iteration, l, num_queries, dist, current_ep, current_lr, pred, eval_adv))
-
- 
-
                 succ += eval_adv
-                
-                # Adversarial found
-                if eval_adv:
-                    break
+
+                if self.test:
+                    if succ ==1:
+                        print ('succ, queries: ', num_queries)
+                    print (g)
+                    if g<1:
+                        break
+                else:
+                    if iteration % self.output_steps == 0:
+                        dist = get_dist(x, batch_data, self.ord)
+                        print("Iter: {}, Loss: {:0.5f}, Queries: {},  Dist: {:0.5f}, Eps:  {}, lr: {:.5f}, Pred: {},  Eval: {}, g: {}".format(iteration, l, num_queries, dist, current_ep, current_lr, pred, eval_adv, g))
+                    if eval_adv:
+                        break
+
 
             time_images[i] = time.time() - start
             query_images[i] = num_queries
@@ -176,7 +189,7 @@ class FW_black:
                 adv[i] = x
             print ('Succ ', succ, ' / ', (i+1), ' rate: ', succ/(i+1))    
         print ('Total Succ ', succ, ' / ', len(inputs), ' rate: ', succ/len(inputs))  
-        print (adv[0], query_images)
+#         print (adv[0], query_images)
         return adv, query_images, time_images, succ/len(inputs)
     
     
