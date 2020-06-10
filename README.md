@@ -1,7 +1,7 @@
 
-# A Frank-Wolfe Framework for Efficient and Effective Adversarial Attacks
+# A Frank-Wolfe Framework for Efficient and Effective Adversarial Attacks (AAAI'20)
 
-This is the code for the [https://arxiv.org/abs/1811.10828](https://arxiv.org/abs/1811.10828) "A Frank-Wolfe Framework for Efficient and Effective Adversarial Attacks" by [Jinghui Chen](http://web.cs.ucla.edu/~jhchen/), [Dongruo Zhou](https://sites.google.com/view/drzhou), [Jinfeng Yi](http://jinfengyi.net/), and [Quanquan Gu](http://web.cs.ucla.edu/~qgu/).
+This is the code for AAAI'20 paper [https://arxiv.org/abs/1811.10828](https://arxiv.org/abs/1811.10828) "A Frank-Wolfe Framework for Efficient and Effective Adversarial Attacks" by [Jinghui Chen](http://web.cs.ucla.edu/~jhchen/), [Dongruo Zhou](https://sites.google.com/view/drzhou), [Jinfeng Yi](http://jinfengyi.net/), and [Quanquan Gu](http://web.cs.ucla.edu/~qgu/).
   
 
 ## Prerequisites
