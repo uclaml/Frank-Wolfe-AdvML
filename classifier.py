@@ -21,16 +21,7 @@ class classifier:
         
         def get_loss(eval_points, labels):
             logits, pred = self.model.predict(eval_points)
-            if self.loss_type == 'cross_entropy':
-                loss = tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=labels)
-            elif self.loss_type == 'cw':
-                correct_logit = tf.reduce_sum(labels * logits, axis=1)
-                wrong_logit = tf.reduce_max((1-labels) * logits, axis=1)
-                loss = tf.maximum(wrong_logit - correct_logit, -50)
-            else:
-                print ('Unknown Loss Type')
-                import sys
-                sys.exit()
+            loss = tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=labels)
             eval_adv = tf.equal(pred, tf.argmax(labels, 1))
             return loss, pred, eval_adv, logits
   

@@ -1,82 +1,53 @@
-import sys
-import tensorflow as tf
-import numpy as np
-from six.moves import xrange
 import time
-
-
-from utils import get_dist, norm_ball_proj_inner, grad_normalization, eps_search
+from utils import *
+import tensorflow as tf
 
 
 class FW_black:
-    def __init__(self, sess, model, nb_iter=10000, grad_est_batch_size=25, ord=np.inf, eps=0.05, clip_min=0, clip_max=1, targeted=True, inception=False, lr = 0.03, delta = 0.01, loss_type = 'cross_entropy', sensing_type = 'gaussian', lambd = 30, beta1 = 0.999, beta2 = 0.99, adaptive = False, output_steps = 10, test = False):
+    def __init__(self, sess, cnn_model, att_iter=10000, grad_est_batch_size=25, order=np.inf, eps=0.05, clip_min=0,
+                 clip_max=1, targeted=True, lr=0.01, delta=0.01, sensing_type='gaussian', q_limit=50000, beta1=0.99):
 
-        image_size, num_channels, num_labels = model.image_size, model.num_channels, model.num_labels
+        image_size, num_channels, num_labels = cnn_model.image_size, cnn_model.num_channels, cnn_model.num_labels
         self.sess = sess
-        self.nb_iter = nb_iter
-        self.model = model
+        self.att_iter = att_iter
+        self.cnn_model = cnn_model
         self.targeted = targeted
         self.grad_est_batch_size = grad_est_batch_size
         self.batch_size = 1  # Only support batch_size = 1 in black-box setting
-        self.ord = ord
+        self.ord = order
         self.epsilon = eps
         self.clip_min = clip_min
         self.clip_max = clip_max
-        self.inception = inception
         self.lr = lr
         self.delta = delta
-        self.loss_type = loss_type
         self.sensing_type = sensing_type
-        self.lambd = lambd
+        self.q_limit = q_limit
         self.beta1 = beta1
-        self.beta2 = beta2
-        self.adaptive = adaptive
-        self.output_steps = output_steps
-        self.test = test
 
-        self.shape = (self.batch_size,image_size,image_size,num_channels)
-        self.single_shape = (image_size,image_size,num_channels)
+        self.shape = (None, image_size, image_size, num_channels)
+        self.single_shape = (image_size, image_size, num_channels)
 
         self.img = tf.placeholder(tf.float32, self.shape)
-        self.lab = tf.placeholder(tf.float32, (self.batch_size,num_labels))
- 
-        def get_loss(eval_points, labels):
-            logits, pred = self.model.predict(eval_points)
-            
-            print (' shape: ',logits.shape, labels.shape)
-            if self.loss_type == 'cross_entropy':
-                loss = tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=labels)
-            elif self.loss_type == 'cw':
-                correct_logit = tf.reduce_sum(labels * logits, axis=1)
-                wrong_logit = tf.reduce_max((1-labels) * logits, axis=1)
-                loss = tf.maximum(wrong_logit - correct_logit, -50)
-            else:
-                print ('Unknown Loss Type')
-                import sys
-                sys.exit()
-            eval_adv = tf.equal(pred, tf.argmax(labels, 1))
-            return loss, pred, eval_adv
-        
-        
-        self.loss, self.pred, self.eval_adv = get_loss(self.img, self.lab)
-        if not self.targeted:
-            self.loss = -self.loss
-        self.tloss = tf.reduce_sum(self.loss)
+        self.lab = tf.placeholder(tf.float32, (None, num_labels))
 
+        self.logits, self.pred = self.cnn_model.predict(self.img)
+        self.loss = tf.nn.softmax_cross_entropy_with_logits(logits=self.logits, labels=self.lab)
+        self.eval_adv = tf.equal(self.pred, tf.argmax(self.lab, 1))
+
+        self.tloss = tf.reduce_sum(self.loss)
         self.gradients, = tf.gradients(self.loss, self.img)
-   
+
         # GRADIENT ESTIMATION GRAPH
         grad_estimates = []
         final_losses = []
-        
+
         noise_pos = tf.random_normal((self.grad_est_batch_size,) + self.single_shape)
-        
         if self.sensing_type == 'sphere':
-            reduc_ind = list(xrange(1, len(self.shape)))
+            reduc_ind = list(range(1, len(self.shape)))
             noise_norm = tf.sqrt(tf.reduce_sum(tf.square(noise_pos), reduction_indices=reduc_ind, keep_dims=True))
             noise_pos = noise_pos / noise_norm
             d = np.prod(self.single_shape)
-            noise_pos = noise_pos * (d**0.5)
+            noise_pos = noise_pos * (d ** 0.5)
             noise = tf.concat([noise_pos, -noise_pos], axis=0)
         elif self.sensing_type == 'gaussian':
             noise = tf.concat([noise_pos, -noise_pos], axis=0)
@@ -84,115 +55,116 @@ class FW_black:
             print ('Unknown Sensing Type')
             import sys
             sys.exit()
-        
+
         self.grad_est_imgs = self.img + self.delta * noise
         self.grad_est_labs = tf.ones([self.grad_est_batch_size * 2, 1]) * self.lab
-        
-        print (self.grad_est_imgs.shape, self.grad_est_labs.shape)
-        
 
-        grad_est_losses, _, _ = get_loss(self.grad_est_imgs, self.grad_est_labs)
+        grad_est_logits, _ = self.cnn_model.predict(self.grad_est_imgs)
+        grad_est_losses = tf.nn.softmax_cross_entropy_with_logits(logits=grad_est_logits, labels=self.grad_est_labs)
         grad_est_losses_tiled = tf.tile(tf.reshape(grad_est_losses, (-1, 1, 1, 1)), (1,) + self.single_shape)
-        grad_estimates.append(tf.reduce_mean(grad_est_losses_tiled * noise, axis=0)/self.delta)
+        grad_estimates.append(tf.reduce_mean(grad_est_losses_tiled * noise, axis=0) / self.delta)
         final_losses.append(grad_est_losses)
         self.grad_estimate = tf.reduce_mean(grad_estimates, axis=0)
         self.final_losses = tf.concat(final_losses, axis=0)
-        
-    
 
- 
+    def eval_image(self, inputs, targets):
+        loss, pred, eval_adv = self.sess.run([self.tloss, self.pred, self.eval_adv],
+                                             {self.img: inputs, self.lab: targets})
+        return loss, pred, eval_adv
 
-    def attack(self, inputs, targets):
-         
-        # GRADIENT ESTIMATION EVAL
-        def get_grad_est(x, batch_lab, num_batches):
-            losses = []
-            grads = []
-            for _ in range(num_batches):
-                final_losses, grad_estimate = self.sess.run([self.final_losses, self.grad_estimate], {self.img: x, self.lab: batch_lab})
-                losses.append(final_losses)
-                grads.append(grad_estimate)
-            grads = np.array(grads)
-            losses = np.array(losses)
-            return losses.mean(), np.mean(grads, axis=0, keepdims = True)
-        
-        adv = []
-        adv = np.array(inputs)
-        query_images = []
-        query_images = np.zeros((len(inputs)))
-        time_images = []
-        time_images = np.zeros((len(inputs)))
-        
-        succ = 0
+    # GRADIENT ESTIMATION EVAL
+    def get_grad_est(self, x, batch_lab, num_batches):
+        losses = []
+        grads = []
+        for _ in range(num_batches):
+            final_losses, grad_estimate = self.sess.run([self.final_losses, self.grad_estimate], {self.img: x,
+                                                                                                  self.lab: batch_lab})
+            losses.append(final_losses)
+            grads.append(grad_estimate)
+        grads = np.array(grads)
+        losses = np.array(losses)
+        return losses.mean(), np.mean(grads, axis=0, keepdims=True)
 
+    def attack(self, inputs, targets, data_ori):
+
+        adv = np.copy(inputs)
+        stop_query = np.zeros((len(inputs)))
+        stop_time = np.zeros((len(inputs)))
+
+        loss_init, pred_init, eval_adv = self.eval_image(inputs, targets)
+        finished_mask = np.logical_not(eval_adv) if not self.targeted else eval_adv
+        succ_sum = sum(finished_mask)
+
+        dist = get_dist(inputs, data_ori, self.ord)
+        print ("Init Loss : % 5.3f, Dist: % 5.3f, Finished: % 3d " % (
+            loss_init, dist, succ_sum))
+
+        if succ_sum == len(inputs):
+            return inputs, stop_query, stop_time, finished_mask
 
         for i in range(len(inputs)):
-            start = time.time()
-            batch_data = inputs[i:i+1]
-            batch_lab = targets[i:i+1]
 
-            x = batch_data
+            data = inputs[i:i + 1]
+            lab = targets[i:i + 1]
+            ori = data_ori[i:i + 1]
+            x = data
             num_batches = 1
-            max_lr = self.lr
-            current_ep = self.epsilon*self.lambd
-            num_queries = 0
+            m_t = np.zeros_like(data)
+
             last_ls = []
- 
-            
-            print ('--------------------')
-            for iteration in range(self.nb_iter):
-                loss, pred, eval_adv, true_grad = self.sess.run([self.tloss, self.pred, self.eval_adv, self.gradients], {self.img: x, self.lab: batch_lab})
-            
+            hist_len = 5
+            min_lr = 1e-3
+            current_lr = self.lr
+            start_decay = 0
+
+            for iteration in range(self.att_iter):
+                start_time = time.time()
+
+                stop_query[i] += num_batches * self.grad_est_batch_size * 2
+
+                if stop_query[i] > self.q_limit:
+                    stop_query[i] = self.q_limit
+                    break
+
                 # Get zeroth-order gradient estimates
-                l, grad = get_grad_est(x, batch_lab, num_batches)
-                num_queries += num_batches*self.grad_est_batch_size *2
-                                
+                _, grad = self.get_grad_est(x, lab, num_batches)
+                # momentum
+                m_t = m_t * self.beta1 + grad * (1 - self.beta1)
+                grad_normalized = grad_normalization(m_t, self.ord)
 
-                # LR Decaying
-                current_lr = self.lr / (iteration + 1)**0.5
-    
- 
-                grad_normalized = grad_normalization(grad, self.ord)
-#                 grad_normalized = grad_normalization(true_grad, self.ord)
- 
+                s_t = - (-1 if not self.targeted else 1) * self.epsilon * grad_normalized + ori
+                d_t = s_t - x
+                current_lr = self.lr if start_decay == 0 else self.lr / (iteration - start_decay + 1) ** 0.5
+                new_x = x + current_lr * d_t
+                new_x = np.clip(new_x, self.clip_min, self.clip_max)
 
-                v = - current_ep * grad_normalized + batch_data
-                d = v - x
-        
-                g = self.epsilon*np.sum(np.abs(true_grad)) - np.sum((batch_data - x)*true_grad)
-                 
-                x = x + current_lr * d
+                x = new_x
+                stop_time[i] += (time.time() - start_time)
 
-                eta = x - batch_data
-                x = batch_data + norm_ball_proj_inner(eta, self.ord, self.epsilon)
-                x = np.clip(x, self.clip_min, self.clip_max)
+                loss, pred, eval_adv = self.eval_image(x, lab)
 
-                succ += eval_adv
+                last_ls.append(loss)
+                last_ls = last_ls[-hist_len:]
+                if last_ls[-1] > 0.999 * last_ls[0] and len(last_ls) == hist_len:
+                    if start_decay == 0:
+                        start_decay = iteration - 1
+                        print ("[log] start decaying lr")
+                    last_ls = []
 
-                if self.test:
-                    if succ ==1:
-                        print ('succ, queries: ', num_queries)
-                    print (g)
-                    if g<1:
-                        break
-                else:
-                    if iteration % self.output_steps == 0:
-                        dist = get_dist(x, batch_data, self.ord)
-                        print("Iter: {}, Loss: {:0.5f}, Queries: {},  Dist: {:0.5f}, Eps:  {}, lr: {:.5f}, Pred: {},  Eval: {}, g: {}".format(iteration, l, num_queries, dist, current_ep, current_lr, pred, eval_adv, g))
-                    if eval_adv:
-                        break
+                finished_mask[i] = np.logical_not(eval_adv[0]) if not self.targeted else eval_adv[0]
 
+                if iteration % 10 == 0:
+                    dist = get_dist(x, ori, self.ord)
+                    print ("Iter: %3d, Loss: %5.3f, Dist: %5.3f, Lr: %5.4f, Finished: %3d, Query: %3d"
+                        % (iteration, loss, dist, current_lr, succ_sum, stop_query[i]))
 
-            time_images[i] = time.time() - start
-            query_images[i] = num_queries
-            if eval_adv:
-                adv[i] = x
-            print ('Succ ', succ, ' / ', (i+1), ' rate: ', succ/(i+1))    
-        print ('Total Succ ', succ, ' / ', len(inputs), ' rate: ', succ/len(inputs))  
-#         print (adv[0], query_images)
-        return adv, query_images, time_images, succ/len(inputs)
-    
-    
-    
-    
-    
+                if finished_mask[i]:
+                    break
+
+            adv[i] = new_x
+
+            dist = get_dist(x, ori, self.ord)
+            print ("End Loss : % 5.3f, Dist: % 5.3f, Finished: % 3d,  Query: % 3d " % (
+                loss, dist, finished_mask[i], stop_query[i]))
+
+        return adv, stop_time, stop_query, finished_mask
